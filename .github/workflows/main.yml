@@ -1,0 +1,203 @@
+name: Build Sashimi Kernel (baseline, ClangBuiltLinux LLVM)
+
+on:
+  push:
+    branches:
+      -
+    paths-ignore:
+      - 'README.md'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or FULL commit SHA to build (blank = the branch you ran this on)"
+        required: false
+        default: ""
+
+env:
+  # VERIFY against arch/arm64/configs/ in the Sashimi tree. The guard step below fails loudly if wrong.
+  KERNEL_DEFCONFIG: "blossom_defconfig"
+  KERNEL_ARCH: "arm64"
+  KBUILD_BUILD_USER: "github-actions"
+  KBUILD_BUILD_HOST: "ci-server"
+  # Prebuilt toolchain from https://www.kernel.org/pub/tools/llvm/ (same family the Sashimi dev uses: 23.1.x).
+  # For an exact match with his 23.1.0 builds, check https://www.kernel.org/pub/tools/llvm/files for a 23.1.0 tarball.
+  LLVM_VERSION: "23.1.4"
+  # Set to "true" only if the build dies on -Werror in vendor drivers.
+  STRIP_WERROR: "false"
+
+jobs:
+  build_and_package:
+    name: Build Kernel & Package AnyKernel3
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Leave this shallow. The Sashimi repo has 800k+ commits.
+          fetch-depth: 1
+          ref: ${{ inputs.ref }}
+
+      - name: Install dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex build-essential libssl-dev libelf-dev cpio kmod git zip curl \
+            ca-certificates xz-utils ccache libxml2 \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+
+      - name: Configure Compiler Cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.ccache
+          key: ${{ runner.os }}-sashimi-ccache-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-sashimi-ccache-
+
+      - name: Cache LLVM toolchain
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/llvm
+          key: llvm-${{ env.LLVM_VERSION }}-x86_64
+
+      - name: Download LLVM toolchain
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: |
+          set -eo pipefail
+          mkdir -p /tmp/llvm
+          curl -fL --retry 3 -o /tmp/llvm.tar.xz \
+            "https://www.kernel.org/pub/tools/llvm/files/llvm-${LLVM_VERSION}-x86_64.tar.xz"
+          tar -C /tmp/llvm -axf /tmp/llvm.tar.xz
+          rm -f /tmp/llvm.tar.xz
+
+      - name: Add LLVM to PATH
+        run: |
+          BIN="$(find /tmp/llvm -maxdepth 3 -path '*/bin/clang' | head -1 | xargs -r dirname)"
+          if [ -z "$BIN" ]; then
+            echo "::error::clang not found under /tmp/llvm"
+            find /tmp/llvm -maxdepth 2
+            exit 1
+          fi
+          echo "Toolchain bin dir: $BIN"
+          echo "$BIN" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        run: |
+          clang --version
+          ld.lld --version
+          llvm-ar --version | head -1
+          aarch64-linux-gnu-gcc --version | head -1
+          arm-linux-gnueabi-gcc --version | head -1
+
+      - name: Check defconfig exists
+        run: |
+          if [ ! -f "arch/${KERNEL_ARCH}/configs/${KERNEL_DEFCONFIG}" ]; then
+            echo "::error::${KERNEL_DEFCONFIG} not found. Available configs:"
+            ls arch/${KERNEL_ARCH}/configs | head -80
+            exit 1
+          fi
+
+      - name: Strip -Werror from vendor drivers
+        if: env.STRIP_WERROR == 'true'
+        shell: bash
+        run: |
+          find drivers -type f -not -type l \( -name 'Makefile*' -o -name 'Kbuild*' \) -print0 | while IFS= read -r -d '' file; do
+            sed -i 's/-Werror[^ ]*//g' "$file" 2>/dev/null || true
+          done
+
+      - name: Build kernel
+        run: |
+          set -eo pipefail
+          export ARCH=${KERNEL_ARCH}
+          export CLANG_TRIPLE="aarch64-linux-gnu-"
+          export CROSS_COMPILE="aarch64-linux-gnu-"
+          export CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
+
+          export CCACHE_DIR=/home/runner/.ccache
+          export CCACHE_MAXSIZE=3G
+          export CCACHE_COMPILERCHECK=content
+          export CCACHE_NOHASHDIR=1
+          export CCACHE_BASEDIR="$PWD"
+          export CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime
+          echo "=== CCACHE INITIAL STATS ==="
+          ccache -s
+
+          MAKE_ARGS=(
+            O=out
+            ARCH=${ARCH}
+            CC="ccache clang"
+            HOSTCC=clang
+            HOSTCXX=clang++
+            LD=ld.lld
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            OBJSIZE=llvm-size
+            READELF=llvm-readelf
+            STRIP=llvm-strip
+            CLANG_TRIPLE=${CLANG_TRIPLE}
+            CROSS_COMPILE=${CROSS_COMPILE}
+            CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32}
+            KCFLAGS="-Wno-error"
+          )
+          make "${MAKE_ARGS[@]}" ${KERNEL_DEFCONFIG}
+          echo "Building Sashimi Kernel with LLVM ${LLVM_VERSION}..."
+          ccache -z
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" 2>&1 | tee build.log
+
+          echo "=== CCACHE FINAL STATS ===" | tee -a build.log
+          ccache -s | tee -a build.log
+
+          echo "=== COMPILE INFO ===" | tee -a build.log
+          cat out/include/generated/compile.h | tee -a build.log || true
+
+      - name: Show first errors
+        if: failure()
+        run: |
+          grep -nE "error:|Error [0-9]|undefined reference" build.log | head -40 || true
+
+      - name: Package AnyKernel3
+        run: |
+          SHORT="$(git rev-parse --short=9 HEAD)"
+          STAMP="$(date -u +%y%m%d-%H%M)"
+          echo "ZIP_NAME=sashimi-${STAMP}-${SHORT}.zip" >> "$GITHUB_ENV"
+
+          git clone --depth=1 https://github.com/Awmid/anykernel.git anykernel
+          cd anykernel
+          rm -f Image* zImage* 
+
+          if [ -f "../out/arch/${KERNEL_ARCH}/boot/Image.gz-dtb" ]; then
+            cp ../out/arch/${KERNEL_ARCH}/boot/Image.gz-dtb Image.gz-dtb
+          elif [ -f "../out/arch/${KERNEL_ARCH}/boot/Image.gz" ]; then
+            cp ../out/arch/${KERNEL_ARCH}/boot/Image.gz Image.gz
+          elif [ -f "../out/arch/${KERNEL_ARCH}/boot/Image" ]; then
+            cp ../out/arch/${KERNEL_ARCH}/boot/Image Image
+          else
+            echo "No kernel image found!"
+            ls -lah ../out/arch/${KERNEL_ARCH}/boot/
+            exit 1
+          fi
+
+          cp ../out/arch/${KERNEL_ARCH}/boot/dtb*.img . 2>/dev/null || echo "No DTB files"
+          zip -r9 "../${ZIP_NAME}" * -x .git README.md *placeholder
+
+      - name: Upload AnyKernel package
+        uses: actions/upload-artifact@v7
+        with:
+          name: Sashimi-Kernel
+          path: ${{ env.ZIP_NAME }}
+          archive: false
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload build log and config
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log-${{ github.sha }}
+          path: |
+            build.log
+            out/.config
+          retention-days: 14
