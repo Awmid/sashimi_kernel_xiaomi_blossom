@@ -19,8 +19,7 @@ env:
   KERNEL_ARCH: "arm64"
   KBUILD_BUILD_USER: "github-actions"
   KBUILD_BUILD_HOST: "ci-server"
-  # Prebuilt toolchain from https://www.kernel.org/pub/tools/llvm/ (same family the Sashimi dev uses: 23.1.x).
-  # For an exact match with his 23.1.0 builds, check https://www.kernel.org/pub/tools/llvm/files for a 23.1.0 tarball.
+  # Prebuilt toolchain from https://www.kernel.org/pub/tools/llvm/
   LLVM_VERSION: "23.1.4"
   # Set to "true" only if the build dies on -Werror in vendor drivers.
   STRIP_WERROR: "false"
@@ -164,8 +163,8 @@ jobs:
           STAMP="$(date -u +%y%m%d-%H%M)"
           echo "ZIP_NAME=sashimi-${STAMP}-${SHORT}.zip" >> "$GITHUB_ENV"
 
-          git clone --depth=1 https://github.com/Awmid/anykernel.git anykernel
-          cd anykernel
+          git clone --depth=1 https://github.com/Awmid/anykernel3.git anykernel3
+          cd anykernel3
           rm -f Image* zImage* 
 
           if [ -f "../out/arch/${KERNEL_ARCH}/boot/Image.gz-dtb" ]; then
