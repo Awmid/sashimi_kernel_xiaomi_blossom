@@ -119,3 +119,7 @@ all.config
 
 # Kdevelop4
 *.kdev4
+
+# Keep GitHub Actions workflow files trackable.
+!.github/
+!.github/**
