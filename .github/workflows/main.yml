@@ -20,7 +20,7 @@ env:
   KBUILD_BUILD_HOST: "ci-server"
   # Official LLVM release from GitHub (verified to exist: LLVM-23.1.0-Linux-X64.tar.xz).
   # 23.1.0 matches the Sashimi dev's reference builds.
-  LLVM_VERSION: "23.1.0-rc3"
+  LLVM_VERSION: "23.1.4"
   # Set to "true" only if the build dies on -Werror in vendor drivers.
   STRIP_WERROR: "false"
 
@@ -109,9 +109,6 @@ jobs:
         run: |
           set -eo pipefail
           export ARCH=${KERNEL_ARCH}
-          export CLANG_TRIPLE="aarch64-linux-gnu-"
-          export CROSS_COMPILE="aarch64-linux-gnu-"
-          export CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
 
           export CCACHE_DIR=/home/runner/.ccache
           export CCACHE_MAXSIZE=3G
@@ -122,29 +119,27 @@ jobs:
           echo "=== CCACHE INITIAL STATS ==="
           ccache -s
 
+          # Same as the dev's toolchain scripts: clang + ld.lld + clang's own assembler (LLVM_IAS=1)
           MAKE_ARGS=(
             O=out
             ARCH=${ARCH}
             CC="ccache clang"
-            HOSTCC=clang
-            HOSTCXX=clang++
             LD=ld.lld
-            AR=llvm-ar
             NM=llvm-nm
+            AR=llvm-ar
             OBJCOPY=llvm-objcopy
             OBJDUMP=llvm-objdump
-            OBJSIZE=llvm-size
             READELF=llvm-readelf
             STRIP=llvm-strip
-            CLANG_TRIPLE=${CLANG_TRIPLE}
-            CROSS_COMPILE=${CROSS_COMPILE}
-            CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32}
+            LLVM_IAS=1
+            HOSTCC=clang
+            HOSTLD=ld.lld
+            HOSTAR=llvm-ar
             KCFLAGS="-Wno-error"
           )
           make "${MAKE_ARGS[@]}" ${KERNEL_DEFCONFIG}
           echo "Building Sashimi Kernel with LLVM ${LLVM_VERSION}..."
           ccache -z
-          # Default target in this tree = Image.gz + dtbs (not Image.gz-dtb)
           make -j"$(nproc)" "${MAKE_ARGS[@]}" Image.gz dtbs 2>&1 | tee build.log
 
           echo "=== CCACHE FINAL STATS ===" | tee -a build.log
