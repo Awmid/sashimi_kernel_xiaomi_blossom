@@ -20,7 +20,7 @@ env:
   KBUILD_BUILD_HOST: "ci-server"
   # Official LLVM release from GitHub (verified to exist: LLVM-23.1.0-Linux-X64.tar.xz).
   # 23.1.0 matches the Sashimi dev's reference builds.
-  LLVM_VERSION: "23.1.0"
+  LLVM_VERSION: "23.1.0-rc3"
   # Set to "true" only if the build dies on -Werror in vendor drivers.
   STRIP_WERROR: "false"
 
@@ -187,25 +187,18 @@ jobs:
             exit 1
           fi
 
-          # Separate DTB (the dev's zip ships Image.gz + a file named 'dtb', no dtbo.img)
-          DTB_NAMES="$(grep '^CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES=' ../out/.config | cut -d'"' -f2)"
-          [ -n "$DTB_NAMES" ] || DTB_NAMES="mediatek/mt6765"
-          echo "DTB names: $DTB_NAMES"
-          : > dtb
-          for n in $DTB_NAMES; do
-            f="$BOOT/dts/$n.dtb"
-            [ -f "$f" ] || { echo "::error::$f not built"; ls -R "$BOOT/dts/mediatek" | head -40; exit 1; }
-            cat "$f" >> dtb
-          done
-          [ -s dtb ] || { echo "::error::dtb is empty"; exit 1; }
-
-          zip -r9 "../${ZIP_NAME}" . -x '.git/*' '.github/*' 'README.md' '*placeholder'
+          # Dev's zip ships no dtb: AnyKernel keeps the stock boot.img DTB
+          zip -r9 "../${ZIP_NAME}" . -x '.git/*' '.github/*' 'README.md' '*placeholder' \
+            'LICENSE' '.gitattributes' 'modules/*' 'patch/*' 'ramdisk/*'
 
           echo "=== ZIP CONTENTS ==="
           unzip -l "../${ZIP_NAME}"
-          for f in anykernel.sh tools/ak3-core.sh dtb; do
+          for f in anykernel.sh tools/ak3-core.sh Image.gz META-INF/com/google/android/update-binary; do
             unzip -l "../${ZIP_NAME}" | grep -q " $f$" || { echo "::error::$f missing from zip"; exit 1; }
           done
+          if unzip -l "../${ZIP_NAME}" | grep -q " dtb$"; then
+            echo "::error::dtb must not be in the zip"; exit 1
+          fi
 
       - name: Upload AnyKernel package
         uses: actions/upload-artifact@v7
