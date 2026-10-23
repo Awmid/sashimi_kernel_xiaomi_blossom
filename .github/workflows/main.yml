@@ -167,7 +167,7 @@ jobs:
 
           BOOT="$PWD/out/arch/${KERNEL_ARCH}/boot"
 
-          git clone --depth=1 https://github.com/Awmid/anykernel.git anykernel
+          git clone --depth=1 https://github.com/Awmid/anykernel3.git anykernel
           cd anykernel
           rm -f Image* zImage* dtb
 
