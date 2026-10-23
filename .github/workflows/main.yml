@@ -1,4 +1,4 @@
-name: Build Sashimi Kernel (baseline, LLVM 23.1.0)
+name: Build Sashimi Kernel (baseline,non KSU)
 
 on:
   push:
