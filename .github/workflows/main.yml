@@ -1,11 +1,11 @@
-name: Build Sashimi Kernel (baseline, ClangBuiltLinux LLVM)
+name: Build Sashimi Kernel (baseline, LLVM 23.1.0)
 
 on:
   push:
     branches:
-      -
+      - sashimi
     paths-ignore:
-      - 'README.md'
+      - 'README*'
   workflow_dispatch:
     inputs:
       ref:
@@ -14,13 +14,13 @@ on:
         default: ""
 
 env:
-  # VERIFY against arch/arm64/configs/ in the Sashimi tree. The guard step below fails loudly if wrong.
   KERNEL_DEFCONFIG: "blossom_defconfig"
   KERNEL_ARCH: "arm64"
   KBUILD_BUILD_USER: "github-actions"
   KBUILD_BUILD_HOST: "ci-server"
-  # Prebuilt toolchain from https://www.kernel.org/pub/tools/llvm/
-  LLVM_VERSION: "23.1.4"
+  # Official LLVM release from GitHub (verified to exist: LLVM-23.1.0-Linux-X64.tar.xz).
+  # 23.1.0 matches the Sashimi dev's reference builds.
+  LLVM_VERSION: "23.1.0"
   # Set to "true" only if the build dies on -Werror in vendor drivers.
   STRIP_WERROR: "false"
 
@@ -33,7 +33,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Leave this shallow. The Sashimi repo has 800k+ commits.
+          # Keep shallow, the Sashimi repo has 800k+ commits.
           fetch-depth: 1
           ref: ${{ inputs.ref }}
 
@@ -41,7 +41,7 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update
-          sudo apt-get install -y bc bison flex build-essential libssl-dev libelf-dev cpio kmod git zip curl \
+          sudo apt-get install -y bc bison flex build-essential libssl-dev libelf-dev cpio kmod git zip unzip curl \
             ca-certificates xz-utils ccache libxml2 \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
@@ -58,7 +58,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/llvm
-          key: llvm-${{ env.LLVM_VERSION }}-x86_64
+          key: llvm-github-${{ env.LLVM_VERSION }}-x86_64
 
       - name: Download LLVM toolchain
         if: steps.llvm-cache.outputs.cache-hit != 'true'
@@ -66,8 +66,8 @@ jobs:
           set -eo pipefail
           mkdir -p /tmp/llvm
           curl -fL --retry 3 -o /tmp/llvm.tar.xz \
-            "https://www.kernel.org/pub/tools/llvm/files/llvm-${LLVM_VERSION}-x86_64.tar.xz"
-          tar -C /tmp/llvm -axf /tmp/llvm.tar.xz
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-Linux-X64.tar.xz"
+          tar -C /tmp/llvm -xf /tmp/llvm.tar.xz
           rm -f /tmp/llvm.tar.xz
 
       - name: Add LLVM to PATH
@@ -144,7 +144,8 @@ jobs:
           make "${MAKE_ARGS[@]}" ${KERNEL_DEFCONFIG}
           echo "Building Sashimi Kernel with LLVM ${LLVM_VERSION}..."
           ccache -z
-          make -j"$(nproc)" "${MAKE_ARGS[@]}" 2>&1 | tee build.log
+          # Default target in this tree = Image.gz + dtbs (not Image.gz-dtb)
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" Image.gz dtbs 2>&1 | tee build.log
 
           echo "=== CCACHE FINAL STATS ===" | tee -a build.log
           ccache -s | tee -a build.log
@@ -159,37 +160,59 @@ jobs:
 
       - name: Package AnyKernel3
         run: |
+          set -eo pipefail
           SHORT="$(git rev-parse --short=9 HEAD)"
           STAMP="$(date -u +%y%m%d-%H%M)"
           echo "ZIP_NAME=sashimi-${STAMP}-${SHORT}.zip" >> "$GITHUB_ENV"
 
-          git clone --depth=1 https://github.com/Awmid/anykernel3.git anykernel3
-          cd anykernel3
-          rm -f Image* zImage* 
+          BOOT="$PWD/out/arch/${KERNEL_ARCH}/boot"
 
-          if [ -f "../out/arch/${KERNEL_ARCH}/boot/Image.gz-dtb" ]; then
-            cp ../out/arch/${KERNEL_ARCH}/boot/Image.gz-dtb Image.gz-dtb
-          elif [ -f "../out/arch/${KERNEL_ARCH}/boot/Image.gz" ]; then
-            cp ../out/arch/${KERNEL_ARCH}/boot/Image.gz Image.gz
-          elif [ -f "../out/arch/${KERNEL_ARCH}/boot/Image" ]; then
-            cp ../out/arch/${KERNEL_ARCH}/boot/Image Image
+          git clone --depth=1 https://github.com/Awmid/anykernel.git anykernel
+          cd anykernel
+          rm -f Image* zImage* dtb
+
+          # Sanity: the template must actually be AnyKernel3
+          for f in anykernel.sh tools/ak3-core.sh META-INF/com/google/android/update-binary; do
+            [ -f "$f" ] || { echo "::error::anykernel repo is missing $f (is Awmid/anykernel pushed and public?)"; ls -la; exit 1; }
+          done
+
+          # Kernel image
+          if [ -f "$BOOT/Image.gz" ]; then
+            cp "$BOOT/Image.gz" Image.gz
+          elif [ -f "$BOOT/Image" ]; then
+            cp "$BOOT/Image" Image
           else
-            echo "No kernel image found!"
-            ls -lah ../out/arch/${KERNEL_ARCH}/boot/
+            echo "::error::No kernel image found"
+            ls -lah "$BOOT"
             exit 1
           fi
 
-          cp ../out/arch/${KERNEL_ARCH}/boot/dtb*.img . 2>/dev/null || echo "No DTB files"
-          zip -r9 "../${ZIP_NAME}" * -x .git README.md *placeholder
+          # Separate DTB (the dev's zip ships Image.gz + a file named 'dtb', no dtbo.img)
+          DTB_NAMES="$(grep '^CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES=' ../out/.config | cut -d'"' -f2)"
+          [ -n "$DTB_NAMES" ] || DTB_NAMES="mediatek/mt6765"
+          echo "DTB names: $DTB_NAMES"
+          : > dtb
+          for n in $DTB_NAMES; do
+            f="$BOOT/dts/$n.dtb"
+            [ -f "$f" ] || { echo "::error::$f not built"; ls -R "$BOOT/dts/mediatek" | head -40; exit 1; }
+            cat "$f" >> dtb
+          done
+          [ -s dtb ] || { echo "::error::dtb is empty"; exit 1; }
+
+          zip -r9 "../${ZIP_NAME}" . -x '.git/*' '.github/*' 'README.md' '*placeholder'
+
+          echo "=== ZIP CONTENTS ==="
+          unzip -l "../${ZIP_NAME}"
+          for f in anykernel.sh tools/ak3-core.sh dtb; do
+            unzip -l "../${ZIP_NAME}" | grep -q " $f$" || { echo "::error::$f missing from zip"; exit 1; }
+          done
 
       - name: Upload AnyKernel package
         uses: actions/upload-artifact@v7
         with:
-          name: Sashimi-Kernel
           path: ${{ env.ZIP_NAME }}
           archive: false
           retention-days: 30
-          compression-level: 0
 
       - name: Upload build log and config
         uses: actions/upload-artifact@v4
