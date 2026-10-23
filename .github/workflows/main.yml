@@ -105,7 +105,7 @@ jobs:
             sed -i 's/-Werror[^ ]*//g' "$file" 2>/dev/null || true
           done
 
-       - name: Build kernel
+      - name: Build kernel
         run: |
           set -eo pipefail
           export ARCH=${KERNEL_ARCH}
