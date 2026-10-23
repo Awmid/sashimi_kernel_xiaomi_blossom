@@ -163,7 +163,8 @@ jobs:
           set -eo pipefail
           SHORT="$(git rev-parse --short=9 HEAD)"
           STAMP="$(date -u +%y%m%d-%H%M)"
-          echo "ZIP_NAME=sashimi-${STAMP}-${SHORT}.zip" >> "$GITHUB_ENV"
+          ZIP_NAME="sashimi-${STAMP}-${SHORT}.zip"
+          echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
 
           BOOT="$PWD/out/arch/${KERNEL_ARCH}/boot"
 
