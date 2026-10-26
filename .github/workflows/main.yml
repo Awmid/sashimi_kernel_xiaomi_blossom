@@ -148,13 +148,15 @@ jobs:
 
         
           echo "================================================="
-          echo "📝 Appending SuSFS Config Fragments..."
+          echo "📝 Appending SuSFS And KSU Config Fragments..."
           echo "================================================="
           DEFCONFIG_PATH="arch/arm64/configs/blossom_defconfig"
         
           cat <<EOT >> "$DEFCONFIG_PATH"
           CONFIG_KSU=y
           CONFIG_KSU_MANUAL_HOOK=y
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
           CONFIG_KSU_SUSFS=y
           CONFIG_USERFAULTFD=n
           CONFIG_KSU_SUSFS_SUS_KSTAT=n
