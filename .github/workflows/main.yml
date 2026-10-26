@@ -36,7 +36,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           # Keep shallow, the Sashimi repo has 800k+ commits.
-          fetch-depth: 1
+          fetch-depth: 0
           ref: ${{ inputs.ref }}
 
       - name: Install dependencies
@@ -112,11 +112,11 @@ jobs:
           echo "📥 Fetching SuSFS 4.19 Patch..."
           echo "================================================="
           curl -fLss "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches/Patch/susfs_patch_to_4.19.patch" -o /tmp/susfs_patch_to_4.19.patch
-          curl -fLss "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches/Patch/susfs_patch_to_4.19.patch" -o /tmp/susfs_inline_hook_patches.sh
+          curl -fLss "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches/susfs_inline_hook_patches.sh" -o /tmp/susfs_inline_hook_patches.sh
           echo "================================================="
           echo "🛠️  Dynamically Patching Kernel..."
           echo "================================================="
-          git apply --whitespace=nowarn --3way -C1 /tmp/susfs_patch_to_4.19.patch
+          patch -p1 --fuzz=3 < /tmp/susfs_patch_to_4.19.patch
           # Give execution permissions to the script and run it over your source tree
           chmod +x /tmp/susfs_inline_hook_patches.sh
           bash /tmp/susfs_inline_hook_patches.sh
