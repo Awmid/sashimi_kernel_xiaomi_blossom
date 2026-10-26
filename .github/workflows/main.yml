@@ -23,6 +23,8 @@ env:
   LLVM_VERSION: "23.1.4"
   # Set to "true" only if the build dies on -Werror in vendor drivers.
   STRIP_WERROR: "false"
+  BAKASU_COMMIT: "main"
+
 
 jobs:
   build_and_package:
@@ -96,6 +98,47 @@ jobs:
             ls arch/${KERNEL_ARCH}/configs | head -80
             exit 1
           fi
+
+      - name: Integrate BakaSu (pinned)
+        run: |
+          set -eo pipefail
+          curl -fLSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_COMMIT}/kernel/setup.sh" | bash -s "${BAKASU_COMMIT}"                  
+          
+      - name: integrate susfs
+        run: |
+          set -eo pipefail
+        
+          echo "================================================="
+          echo "📥 Fetching SuSFS 4.19 Patch..."
+          echo "================================================="
+          curl -fLss "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches/Patch/susfs_patch_to_4.19.patch" -o /tmp/susfs_patch_to_4.19.patch
+          curl -fLss "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches/Patch/susfs_patch_to_4.19.patch" -o /tmp/susfs_inline_hook_patches.sh
+          echo "================================================="
+          echo "🛠️  Dynamically Patching Kernel..."
+          echo "================================================="
+          git apply --whitespace=nowarn /tmp/susfs_patch_to_4.19.patch
+          # Give execution permissions to the script and run it over your source tree
+          chmod +x /tmp/susfs_inline_hook_patches.sh
+          bash /tmp/susfs_inline_hook_patches.sh
+
+        
+          echo "================================================="
+          echo "📝 Appending SuSFS Config Fragments..."
+          echo "================================================="
+          DEFCONFIG_PATH="arch/arm64/configs/blossom_defconfig"
+        
+          cat <<EOT >> "$DEFCONFIG_PATH"
+          CONFIG_KSU=y
+          CONFIG_KSU_MANUAL_HOOK=y
+          CONFIG_KSU_SUSFS=y
+          CONFIG_USERFAULTFD=n
+          CONFIG_KSU_SUSFS_SUS_KSTAT=n
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          EOT
+        
+          echo "✅ SuSFS patch and configurations successfully applied!"
+
 
       - name: Strip -Werror from vendor drivers
         if: env.STRIP_WERROR == 'true'
