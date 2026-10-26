@@ -112,26 +112,39 @@ jobs:
           echo "================================================="
           curl -fLss "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches/Patch/susfs_patch_to_4.19.patch" -o /tmp/susfs_patch_to_4.19.patch
           curl -fLss "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches/susfs_inline_hook_patches.sh" -o /tmp/susfs_inline_hook_patches.sh
+
+
           echo "================================================="
           echo "🛠️  Dynamically Patching Kernel..."
           echo "================================================="
           patch -p1 --fuzz=3 < /tmp/susfs_patch_to_4.19.patch || true
+
+
           echo "================================================="
           echo "🔧 Auto-Repairing Hunk #6 Mismatch (fs/namespace.c)..."
           echo "================================================="
           set -eo pipefail
           
           # We target alloc_vfsmnt inside vfs_kern_mount directly and inline patch it to resolve the failure
-          if grep -q "mnt = alloc_vfsmnt(name);" fs/namespace.c; then
-              sed -i 's/mnt = alloc_vfsmnt(name);/#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(name ?:"none");\n\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n#endif\n\tmnt = alloc_vfsmnt(name);\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif/g' fs/namespace.c
+          if grep -q "mnt = alloc_vfsmnt(fc->source ?: \"none\");" fs/namespace.c; then
+
+              sed -i 's/mnt = alloc_vfsmnt(fc->source ?: \"none\");/#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(fc->source ?:"none");\n\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n#endif\n\tmnt = alloc_vfsmnt(fc->source ?: \"none\");\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif/g' fs/namespace.c
+
               echo "✅ Hunk #6 auto-repaired successfully!"
+          elif grep -q "mnt = alloc_vfsmnt(name ?:\"none\");" fs/namespace.c; then
+              sed -i 's/mnt = alloc_vfsmnt(name ?:\"none\");/#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(name ?:"none");\n\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n#endif\n\tmnt = alloc_vfsmnt(name ?:\"none\");\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif/g' fs/namespace.c
+              echo "✅ Hunk #6 auto-repaired successfully via fallback signature!"
           else
-              echo "❌ Critical fallback: alloc_vfsmnt signature not found in namespace.c"
+              echo "❌ Critical fallback: Modern signature targets not found in namespace.c"
               exit 1
           fi
 
+          echo "================================================="
+          echo "🧬 Executing Backporter's Inline Hook Script..."
+          echo "================================================="
           chmod +x /tmp/susfs_inline_hook_patches.sh
           bash /tmp/susfs_inline_hook_patches.sh
+
 
         
           echo "================================================="
