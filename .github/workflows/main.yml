@@ -117,6 +117,20 @@ jobs:
           echo "🛠️  Dynamically Patching Kernel..."
           echo "================================================="
           patch -p1 --fuzz=3 < /tmp/susfs_patch_to_4.19.patch
+          echo "================================================="
+          echo "🔧 Auto-Repairing Hunk #6 Mismatch (fs/namespace.c)..."
+          echo "================================================="
+          # We target alloc_vfsmnt inside vfs_kern_mount directly and inline patch it to resolve the failure
+          if grep -q "mnt = alloc_vfsmnt(name);" fs/namespace.c; then
+              sed -i 's/mnt = alloc_vfsmnt(name);/#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(name ?:"none");\n\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n#endif\n\tmnt = alloc_vfsmnt(name);\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif/g' fs/namespace.c
+              echo "✅ Hunk #6 auto-repaired successfully!"
+          else
+              echo "❌ Critical fallback: alloc_vfsmnt signature not found in namespace.c"
+              exit 1
+          fi
+
+          # Re-enable strict error capturing for script safety
+          set -eo pipefail
           # Give execution permissions to the script and run it over your source tree
           chmod +x /tmp/susfs_inline_hook_patches.sh
           bash /tmp/susfs_inline_hook_patches.sh
