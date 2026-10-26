@@ -119,6 +119,10 @@ jobs:
           echo "================================================="
           patch -p1 --fuzz=3 < /tmp/susfs_patch_to_4.19.patch || true
 
+          if find . -name '*.rej' | grep -q .; then
+             find . -name '*.rej'; echo "::error::SUSFS patch rejects"; exit 1
+          fi
+
 
           echo "================================================="
           echo "🔧 Auto-Repairing Hunk #6 Mismatch (fs/namespace.c)..."
