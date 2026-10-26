@@ -1,4 +1,4 @@
-name: Build Sashimi Kernel (KSU+SUSFS)
+name: Build Sashimi Kernel (BakaSU + SUSFS)
 
 on:
   push:
@@ -13,18 +13,29 @@ on:
         required: false
         default: ""
 
+concurrency:
+  group: ksu-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   KERNEL_DEFCONFIG: "blossom_defconfig"
   KERNEL_ARCH: "arm64"
   KBUILD_BUILD_USER: "github-actions"
   KBUILD_BUILD_HOST: "ci-server"
-  # Official LLVM release from GitHub (verified to exist: LLVM-23.1.0-Linux-X64.tar.xz).
-  # 23.1.0 matches the Sashimi dev's reference builds.
   LLVM_VERSION: "23.1.4"
   # Set to "true" only if the build dies on -Werror in vendor drivers.
   STRIP_WERROR: "false"
-  BAKASU_COMMIT: "main"
 
+  # ---- Pins ------------------------------------------------------------
+  # Everything below is floating on purpose until the first green build.
+  # The "Record integration versions" step prints the exact SHAs and
+  # hashes. Once green, paste them here and the build becomes reproducible.
+  BAKASU_COMMIT: "main"
+  SUSFS_PATCH_REF: "mainline"
+
+defaults:
+  run:
+    shell: bash -eo pipefail {0}
 
 jobs:
   build_and_package:
@@ -44,16 +55,16 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update
           sudo apt-get install -y bc bison flex build-essential libssl-dev libelf-dev cpio kmod git zip unzip curl \
-            ca-certificates xz-utils ccache libxml2 \
+            ca-certificates xz-utils ccache libxml2 python3 \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
       - name: Configure Compiler Cache
         uses: actions/cache@v4
         with:
           path: /home/runner/.ccache
-          key: ${{ runner.os }}-sashimi-ccache-${{ github.run_id }}
+          key: ${{ runner.os }}-sashimi-ksu-ccache-${{ github.run_id }}
           restore-keys: |
-            ${{ runner.os }}-sashimi-ccache-
+            ${{ runner.os }}-sashimi-ksu-ccache-
 
       - name: Cache LLVM toolchain
         id: llvm-cache
@@ -65,7 +76,6 @@ jobs:
       - name: Download LLVM toolchain
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: |
-          set -eo pipefail
           mkdir -p /tmp/llvm
           curl -fL --retry 3 -o /tmp/llvm.tar.xz \
             "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-Linux-X64.tar.xz"
@@ -99,90 +109,159 @@ jobs:
             exit 1
           fi
 
-      - name: Integrate BakaSu (pinned)
+      # ------------------------------------------------------------------
+      # 1. KernelSU driver (BakaSU)
+      # ------------------------------------------------------------------
+      - name: Integrate BakaSU
         run: |
-          set -eo pipefail
-          curl -fLSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_COMMIT}/kernel/setup.sh" | bash -s "${BAKASU_COMMIT}"                  
-          
-      - name: integrate susfs
+          curl -fLSs --retry 3 \
+            "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_COMMIT}/kernel/setup.sh" \
+            | bash -s "${BAKASU_COMMIT}"
+          test -e drivers/kernelsu/Makefile || { echo "::error::drivers/kernelsu missing after setup.sh"; exit 1; }
+
+      # ------------------------------------------------------------------
+      # 2. SUSFS core patch (fuzzy), then fail on anything unexpected
+      # ------------------------------------------------------------------
+      - name: Download SUSFS patch + hook script
         run: |
-         
-          echo "================================================="
-          echo "📥 Fetching SuSFS 4.19 Patch..."
-          echo "================================================="
-          curl -fLss "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches/Patch/susfs_patch_to_4.19.patch" -o /tmp/susfs_patch_to_4.19.patch
-          curl -fLss "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches/susfs_inline_hook_patches.sh" -o /tmp/susfs_inline_hook_patches.sh
+          BASE="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/${SUSFS_PATCH_REF}/Patches"
+          curl -fLSs --retry 3 "$BASE/Patch/susfs_patch_to_4.19.patch" -o /tmp/susfs_patch_to_4.19.patch
+          curl -fLSs --retry 3 "$BASE/susfs_inline_hook_patches.sh"    -o /tmp/susfs_inline_hook_patches.sh
+          test -s /tmp/susfs_patch_to_4.19.patch
+          test -s /tmp/susfs_inline_hook_patches.sh
 
+      - name: Record integration versions
+        run: |
+          {
+            echo "BakaSU ref requested : ${BAKASU_COMMIT}"
+            echo "BakaSU resolved SHA  : $(git -C KernelSU rev-parse HEAD)"
+            echo "SUSFS patch ref      : ${SUSFS_PATCH_REF}"
+            sha256sum /tmp/susfs_patch_to_4.19.patch /tmp/susfs_inline_hook_patches.sh
+          } | tee integration-versions.txt
 
-          echo "================================================="
-          echo "🛠️  Dynamically Patching Kernel..."
-          echo "================================================="
-          patch -p1 --fuzz=3 < /tmp/susfs_patch_to_4.19.patch || true
+      - name: Apply SUSFS patch
+        run: |
+          set +e
+          patch -p1 --fuzz=3 --no-backup-if-mismatch < /tmp/susfs_patch_to_4.19.patch | tee susfs-patch.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "patch exit code: $rc"
 
-          if find . -name '*.rej' | grep -q .; then
-             find . -name '*.rej'; echo "::error::SUSFS patch rejects"; exit 1
+          # The only reject we know how to repair is fs/namespace.c.
+          # Anything else means hooks are silently missing -> stop now.
+          bad=0
+          while IFS= read -r rej; do
+            echo "::warning::reject: $rej"
+            if [ "$rej" != "./fs/namespace.c.rej" ]; then
+              bad=1
+              echo "----- $rej -----"; cat "$rej"
+            fi
+          done < <(find . -name '*.rej' -not -path './out/*' -not -path './KernelSU/*')
+          if [ "$bad" = 1 ]; then
+            echo "::error::SUSFS patch has unexpected rejects, refusing to build a half-hooked kernel"
+            exit 1
           fi
 
+      - name: Repair fs/namespace.c reject (vfs_kern_mount hunk)
+        run: |
+          python3 - <<'PY'
+          import re, sys, os
 
-          echo "================================================="
-          echo "🔧 Auto-Repairing Hunk #6 Mismatch (fs/namespace.c)..."
-          echo "================================================="
-          set -eo pipefail
-          
-          # We target alloc_vfsmnt inside vfs_kern_mount directly and inline patch it to resolve the failure
-          if grep -q "mnt = alloc_vfsmnt(fc->source ?: \"none\");" fs/namespace.c; then
+          p = "fs/namespace.c"
+          s = open(p).read()
 
-              sed -i 's/mnt = alloc_vfsmnt(fc->source ?: \"none\");/#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(fc->source ?:"none");\n\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n#endif\n\tmnt = alloc_vfsmnt(fc->source ?: \"none\");\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif/g' fs/namespace.c
+          if "bypass_orig_flow:" in s:
+              print("namespace.c: hunk already applied, nothing to repair")
+              sys.exit(0)
 
-              echo "✅ Hunk #6 auto-repaired successfully!"
-          elif grep -q "mnt = alloc_vfsmnt(name ?:\"none\");" fs/namespace.c; then
-              sed -i 's/mnt = alloc_vfsmnt(name ?:\"none\");/#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(name ?:"none");\n\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n#endif\n\tmnt = alloc_vfsmnt(name ?:\"none\");\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif/g' fs/namespace.c
-              echo "✅ Hunk #6 auto-repaired successfully via fallback signature!"
-          else
-              echo "❌ Critical fallback: Modern signature targets not found in namespace.c"
-              exit 1
-          fi
+          # Signature differs between trees (fc->source ?: "none" / name ? name : "none" ...),
+          # so capture whatever argument is passed. Only vfs_kern_mount passes "none".
+          m = re.search(r'^([ \t]*)mnt = alloc_vfsmnt\(([^;]*"none"[^;]*)\);[ \t]*$', s, re.M)
+          if not m:
+              print("::error::namespace.c: no alloc_vfsmnt(... \"none\") call found, cannot repair")
+              sys.exit(1)
 
-          echo "================================================="
-          echo "🧬 Executing Backporter's Inline Hook Script..."
-          echo "================================================="
-          chmod +x /tmp/susfs_inline_hook_patches.sh
+          ind, arg = m.group(1), m.group(2)
+          new = (
+              "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+              f"{ind}if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {{\n"
+              f"{ind}\tif (susfs_is_current_ksu_domain()) {{\n"
+              f"{ind}\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt({arg});\n"
+              f"{ind}\t\tgoto bypass_orig_flow;\n"
+              f"{ind}\t}}\n"
+              f"{ind}}}\n"
+              "#endif\n"
+              f"{ind}mnt = alloc_vfsmnt({arg});\n"
+              "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+              "bypass_orig_flow:\n"
+              "#endif"
+          )
+          s = s[:m.start()] + new + s[m.end():]
+          open(p, "w").write(s)
+          print("namespace.c: repaired, arg =", arg)
+          if os.path.exists("fs/namespace.c.rej"):
+              os.remove("fs/namespace.c.rej")
+          PY
+
+      - name: Run SUSFS inline hook script
+        run: |
           bash /tmp/susfs_inline_hook_patches.sh
+          # Same rule as above: no leftovers allowed
+          if find . \( -name '*.rej' -o -name '*.orig' \) -not -path './out/*' -not -path './KernelSU/*' | grep -q .; then
+            find . \( -name '*.rej' -o -name '*.orig' \) -not -path './out/*' -not -path './KernelSU/*'
+            echo "::error::hook script left .rej/.orig files"
+            exit 1
+          fi
 
+      - name: Sanity check SUSFS sources
+        run: |
+          for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
+            [ -f "$f" ] || { echo "::error::$f missing after SUSFS patch"; exit 1; }
+          done
+          grep -q 'susfs' fs/Makefile || { echo "::error::fs/Makefile has no susfs entry"; exit 1; }
 
-        
-          echo "================================================="
-          echo "📝 Appending SuSFS And KSU Config Fragments..."
-          echo "================================================="
-          DEFCONFIG_PATH="arch/arm64/configs/blossom_defconfig"
-        
-          cat <<EOT >> "$DEFCONFIG_PATH"
+      # ------------------------------------------------------------------
+      # 3. Config. DEBUG_KERNEL is required: KALLSYMS_ALL depends on it and
+      #    Sashimi's savedefconfig does not set it, so Kconfig drops
+      #    KALLSYMS_ALL silently and BakaSU's static export check fails.
+      # ------------------------------------------------------------------
+      - name: Append KSU + SUSFS config
+        run: |
+          cat >> "arch/${KERNEL_ARCH}/configs/${KERNEL_DEFCONFIG}" <<'EOT'
+
+          # --- KernelSU / SUSFS (appended by CI) ---
           CONFIG_KSU=y
           CONFIG_KSU_MANUAL_HOOK=y
           CONFIG_DEBUG_KERNEL=y
           CONFIG_KALLSYMS=y
           CONFIG_KALLSYMS_ALL=y
           CONFIG_KSU_SUSFS=y
-          CONFIG_USERFAULTFD=n
-          CONFIG_KSU_SUSFS_SUS_KSTAT=n
           CONFIG_KSU_SUSFS_SUS_PATH=y
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          # CONFIG_KSU_SUSFS_SUS_KSTAT is not set
+          # Disabled to match the known-good JJK build
+          # CONFIG_USERFAULTFD is not set
           EOT
-        
-          echo "✅ SuSFS patch and configurations successfully applied!"
 
+      - name: Save integration diff
+        run: |
+          git add -A -- . ':!KernelSU' ':!drivers/kernelsu'
+          git diff --cached --stat | tail -40
+          git diff --cached > susfs-integration.diff
+          git reset -q
 
       - name: Strip -Werror from vendor drivers
         if: env.STRIP_WERROR == 'true'
-        shell: bash
         run: |
           find drivers -type f -not -type l \( -name 'Makefile*' -o -name 'Kbuild*' \) -print0 | while IFS= read -r -d '' file; do
             sed -i 's/-Werror[^ ]*//g' "$file" 2>/dev/null || true
           done
 
+      # ------------------------------------------------------------------
+      # 4. Build
+      # ------------------------------------------------------------------
       - name: Build kernel
         run: |
-          set -eo pipefail
           export ARCH=${KERNEL_ARCH}
 
           export CCACHE_DIR=/home/runner/.ccache
@@ -194,10 +273,20 @@ jobs:
           echo "=== CCACHE INITIAL STATS ==="
           ccache -s
 
-          # Step 1: defconfig (no cross-compile flags, same as the dev's script)
-          make O=out ARCH=${ARCH} CC=clang LD=ld.lld ${KERNEL_DEFCONFIG}
+          make O=out ARCH=${ARCH} CC=clang LD=ld.lld ${KERNEL_DEFCONFIG} 2>&1 | tee defconfig.log
 
-          # Step 2: build, matching the dev's toolchain script (clang + LLVM_IAS=1)
+          # Fail fast if Kconfig silently dropped anything we need
+          missing=0
+          for sym in CONFIG_KSU=y CONFIG_KSU_MANUAL_HOOK=y CONFIG_DEBUG_KERNEL=y \
+                     CONFIG_KALLSYMS_ALL=y CONFIG_KSU_SUSFS=y \
+                     CONFIG_KSU_SUSFS_SUS_PATH=y CONFIG_KSU_SUSFS_SUS_MOUNT=y; do
+            if ! grep -qx "$sym" out/.config; then
+              echo "::error::$sym not in out/.config (dropped by Kconfig? check dependencies)"
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ] || exit 1
+
           BUILD_ARGS=(
             O=out
             ARCH=${ARCH}
@@ -231,14 +320,24 @@ jobs:
       - name: Show first errors
         if: failure()
         run: |
-          grep -nE "error:|Error [0-9]|undefined reference" build.log | head -40 || true
+          grep -nE "error:|\*\*\*|Error [0-9]|undefined reference|implicit declaration" build.log | head -40 || true
 
+      - name: Verify KSU + SUSFS made it into the image
+        run: |
+          n_ksu=$(grep -c ' [tT] ksu_'   out/System.map || true)
+          n_sus=$(grep -c ' [tT] susfs_' out/System.map || true)
+          echo "ksu_* text symbols: $n_ksu, susfs_* text symbols: $n_sus"
+          [ "$n_ksu" -gt 0 ] || { echo "::error::no ksu_ symbols in System.map"; exit 1; }
+          [ "$n_sus" -gt 0 ] || { echo "::error::no susfs_ symbols in System.map"; exit 1; }
+
+      # ------------------------------------------------------------------
+      # 5. Package
+      # ------------------------------------------------------------------
       - name: Package AnyKernel3
         run: |
-          set -eo pipefail
           SHORT="$(git rev-parse --short=9 HEAD)"
           STAMP="$(date -u +%y%m%d-%H%M)"
-          ZIP_NAME="sashimi-${STAMP}-${SHORT}.zip"
+          ZIP_NAME="sashimi-ksu-${STAMP}-${SHORT}.zip"
           echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
 
           BOOT="$PWD/out/arch/${KERNEL_ARCH}/boot"
@@ -247,12 +346,10 @@ jobs:
           cd anykernel
           rm -f Image* zImage* dtb
 
-          # Sanity: the template must actually be AnyKernel3
           for f in anykernel.sh tools/ak3-core.sh META-INF/com/google/android/update-binary; do
-            [ -f "$f" ] || { echo "::error::anykernel repo is missing $f (is Awmid/anykernel pushed and public?)"; ls -la; exit 1; }
+            [ -f "$f" ] || { echo "::error::anykernel repo is missing $f"; ls -la; exit 1; }
           done
 
-          # Kernel image
           if [ -f "$BOOT/Image.gz" ]; then
             cp "$BOOT/Image.gz" Image.gz
           elif [ -f "$BOOT/Image" ]; then
@@ -283,12 +380,17 @@ jobs:
           archive: false
           retention-days: 30
 
-      - name: Upload build log and config
+      - name: Upload logs, config and integration diff
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: build-log-${{ github.sha }}
           path: |
             build.log
+            defconfig.log
+            susfs-patch.log
+            integration-versions.txt
+            susfs-integration.diff
             out/.config
+          if-no-files-found: ignore
           retention-days: 14
