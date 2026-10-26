@@ -36,7 +36,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           # Keep shallow, the Sashimi repo has 800k+ commits.
-          fetch-depth: 0
+          fetch-depth: 1
           ref: ${{ inputs.ref }}
 
       - name: Install dependencies
