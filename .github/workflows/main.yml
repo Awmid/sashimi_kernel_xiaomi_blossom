@@ -1,4 +1,4 @@
-name: Build Sashimi Kernel (baseline,non KSU)
+name: Build Sashimi Kernel (KSU+SUSFS)
 
 on:
   push:
