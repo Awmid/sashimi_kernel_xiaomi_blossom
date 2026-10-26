@@ -220,21 +220,38 @@ jobs:
           done
           grep -q 'susfs' fs/Makefile || { echo "::error::fs/Makefile has no susfs entry"; exit 1; }
 
+      - name: Export static SELinux symbols (BakaSU static-export check)
+        run: |
+          sed -i 's/^static const struct file_operations sel_handle_status_ops/const struct file_operations sel_handle_status_ops/' \
+            security/selinux/selinuxfs.c
+          sed -i -e 's/^static void security_dump_masked_av/void security_dump_masked_av/' \
+                 -e 's/^static void context_struct_compute_av/void context_struct_compute_av/' \
+            security/selinux/ss/services.c
+          # Same patterns BakaSU greps for: none may remain
+          fail=0
+          grep -qF 'static const struct file_operations sel_handle_status_ops' security/selinux/selinuxfs.c && { echo "::error::sel_handle_status_ops still static"; fail=1; }
+          grep -qF 'static void security_dump_masked_av'  security/selinux/ss/services.c && { echo "::error::security_dump_masked_av still static"; fail=1; }
+          grep -qF 'static void context_struct_compute_av' security/selinux/ss/services.c && { echo "::error::context_struct_compute_av still static"; fail=1; }
+          [ "$fail" = 0 ]
+
       # ------------------------------------------------------------------
-      # 3. Config. DEBUG_KERNEL is required: KALLSYMS_ALL depends on it and
-      #    Sashimi's savedefconfig does not set it, so Kconfig drops
-      #    KALLSYMS_ALL silently and BakaSU's static export check fails.
+      # 3. Config. Do NOT enable DEBUG_KERNEL/KALLSYMS_ALL here: DEBUG_KERNEL
+      #    flips defaults across the whole tree (FTRACE becomes default y,
+      #    SCHED_DEBUG, DEBUG_PREEMPT...) and broke the vendor-hook link.
+      #    BakaSU's static export check is satisfied by un-static'ing the
+      #    SELinux symbols instead (previous step).
       # ------------------------------------------------------------------
       - name: Append KSU + SUSFS config
         run: |
+          # Snapshot the config WITHOUT our fragment so we can diff it later
+          make O=/tmp/out_base ARCH=${KERNEL_ARCH} CC=clang LD=ld.lld ${KERNEL_DEFCONFIG} >/dev/null 2>&1 || true
+
           cat >> "arch/${KERNEL_ARCH}/configs/${KERNEL_DEFCONFIG}" <<'EOT'
 
           # --- KernelSU / SUSFS (appended by CI) ---
           CONFIG_KSU=y
           CONFIG_KSU_MANUAL_HOOK=y
-          CONFIG_DEBUG_KERNEL=y
           CONFIG_KALLSYMS=y
-          CONFIG_KALLSYMS_ALL=y
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
@@ -277,8 +294,7 @@ jobs:
 
           # Fail fast if Kconfig silently dropped anything we need
           missing=0
-          for sym in CONFIG_KSU=y CONFIG_KSU_MANUAL_HOOK=y CONFIG_DEBUG_KERNEL=y \
-                     CONFIG_KALLSYMS_ALL=y CONFIG_KSU_SUSFS=y \
+          for sym in CONFIG_KSU=y CONFIG_KSU_MANUAL_HOOK=y CONFIG_KSU_SUSFS=y \
                      CONFIG_KSU_SUSFS_SUS_PATH=y CONFIG_KSU_SUSFS_SUS_MOUNT=y; do
             if ! grep -qx "$sym" out/.config; then
               echo "::error::$sym not in out/.config (dropped by Kconfig? check dependencies)"
@@ -286,6 +302,15 @@ jobs:
             fi
           done
           [ "$missing" = 0 ] || exit 1
+
+          # What did our fragment actually change vs. the plain baseline config?
+          if [ -f /tmp/out_base/.config ]; then
+            diff <(grep -E '^(CONFIG_|# CONFIG_)' /tmp/out_base/.config | sort) \
+                 <(grep -E '^(CONFIG_|# CONFIG_)' out/.config | sort) | tee config-delta.txt || true
+          fi
+          grep -E 'CONFIG_(TRACEPOINTS|ANDROID_VENDOR_HOOKS|FTRACE|ANDROID)[= ]' out/.config || true
+          grep -qx 'CONFIG_ANDROID_VENDOR_HOOKS=y' out/.config || \
+            echo "::warning::ANDROID_VENDOR_HOOKS is not y: vendor_hooks.o will not be built and the link will fail"
 
           BUILD_ARGS=(
             O=out
@@ -391,6 +416,7 @@ jobs:
             susfs-patch.log
             integration-versions.txt
             susfs-integration.diff
+            config-delta.txt
             out/.config
           if-no-files-found: ignore
           retention-days: 14
