@@ -170,35 +170,37 @@ jobs:
           p = "fs/namespace.c"
           s = open(p).read()
 
-          if "bypass_orig_flow:" in s:
-              print("namespace.c: hunk already applied, nothing to repair")
-              sys.exit(0)
-
-          # Signature differs between trees (fc->source ?: "none" / name ? name : "none" ...),
-          # so capture whatever argument is passed. Only vfs_kern_mount passes "none".
+          # The vfs_create_mount()/vfs_kern_mount() allocation is the only alloc_vfsmnt()
+          # call that passes the literal "none". Other susfs hunks (clone_mnt) already
+          # define a bypass_orig_flow label, so key on the call itself, not the label.
           m = re.search(r'^([ \t]*)mnt = alloc_vfsmnt\(([^;]*"none"[^;]*)\);[ \t]*$', s, re.M)
           if not m:
-              print("::error::namespace.c: no alloc_vfsmnt(... \"none\") call found, cannot repair")
-              sys.exit(1)
+              if re.search(r'susfs_alloc_non_unshare_ksu_vfsmnt\([^;]*"none"', s):
+                  print("namespace.c: mount hook already present")
+              else:
+                  print('::error::namespace.c: no alloc_vfsmnt(... "none") call found, cannot repair')
+                  sys.exit(1)
+          else:
+              ind, arg = m.group(1), m.group(2)
+              new = (
+                  "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+                  f"{ind}if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {{\n"
+                  f"{ind}\tif (susfs_is_current_ksu_domain()) {{\n"
+                  f"{ind}\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt({arg});\n"
+                  f"{ind}\t\tgoto bypass_orig_flow;\n"
+                  f"{ind}\t}}\n"
+                  f"{ind}}}\n"
+                  "#endif\n"
+                  f"{ind}mnt = alloc_vfsmnt({arg});\n"
+                  "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+                  "bypass_orig_flow:\n"
+                  "#endif"
+              )
+              s = s[:m.start()] + new + s[m.end():]
+              open(p, "w").write(s)
+              print("namespace.c: repaired, arg =", arg)
 
-          ind, arg = m.group(1), m.group(2)
-          new = (
-              "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
-              f"{ind}if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {{\n"
-              f"{ind}\tif (susfs_is_current_ksu_domain()) {{\n"
-              f"{ind}\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt({arg});\n"
-              f"{ind}\t\tgoto bypass_orig_flow;\n"
-              f"{ind}\t}}\n"
-              f"{ind}}}\n"
-              "#endif\n"
-              f"{ind}mnt = alloc_vfsmnt({arg});\n"
-              "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
-              "bypass_orig_flow:\n"
-              "#endif"
-          )
-          s = s[:m.start()] + new + s[m.end():]
-          open(p, "w").write(s)
-          print("namespace.c: repaired, arg =", arg)
+          # repaired (or already present): the leftover reject is now obsolete
           if os.path.exists("fs/namespace.c.rej"):
               os.remove("fs/namespace.c.rej")
           PY
@@ -418,5 +420,6 @@ jobs:
             susfs-integration.diff
             config-delta.txt
             out/.config
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 14
