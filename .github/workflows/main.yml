@@ -252,7 +252,8 @@ jobs:
 
           # --- KernelSU / SUSFS (appended by CI) ---
           CONFIG_KSU=y
-          CONFIG_KSU_MANUAL_HOOK=y
+          # BakaSU hook method is a Kconfig choice: SUSFS Inline Hook is its own
+          # mode and displaces MANUAL_HOOK, so do NOT set KSU_MANUAL_HOOK here.
           CONFIG_KALLSYMS=y
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
@@ -296,7 +297,7 @@ jobs:
 
           # Fail fast if Kconfig silently dropped anything we need
           missing=0
-          for sym in CONFIG_KSU=y CONFIG_KSU_MANUAL_HOOK=y CONFIG_KSU_SUSFS=y \
+          for sym in CONFIG_KSU=y CONFIG_KSU_SUSFS=y \
                      CONFIG_KSU_SUSFS_SUS_PATH=y CONFIG_KSU_SUSFS_SUS_MOUNT=y; do
             if ! grep -qx "$sym" out/.config; then
               echo "::error::$sym not in out/.config (dropped by Kconfig? check dependencies)"
