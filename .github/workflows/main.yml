@@ -226,12 +226,18 @@ jobs:
         run: |
           sed -i 's/^static const struct file_operations sel_handle_status_ops/const struct file_operations sel_handle_status_ops/' \
             security/selinux/selinuxfs.c
+          # Sashimi declares it as 'static ssize_t (*const write_op[])', which BakaSU's
+          # check pattern misses (false "found"), so it stays static and the link fails.
+          # Keep the const: BakaSU declares it 'extern ssize_t (*const write_op[])' and
+          # patches it through ksu_patch_text().
+          sed -i -E 's/^static (ssize_t \(\*(const )?write_op\[\])/\1/' security/selinux/selinuxfs.c
           sed -i -e 's/^static void security_dump_masked_av/void security_dump_masked_av/' \
                  -e 's/^static void context_struct_compute_av/void context_struct_compute_av/' \
             security/selinux/ss/services.c
           # Same patterns BakaSU greps for: none may remain
           fail=0
           grep -qF 'static const struct file_operations sel_handle_status_ops' security/selinux/selinuxfs.c && { echo "::error::sel_handle_status_ops still static"; fail=1; }
+          grep -qE '^static.*write_op\[' security/selinux/selinuxfs.c && { echo "::error::write_op still static"; fail=1; }
           grep -qF 'static void security_dump_masked_av'  security/selinux/ss/services.c && { echo "::error::security_dump_masked_av still static"; fail=1; }
           grep -qF 'static void context_struct_compute_av' security/selinux/ss/services.c && { echo "::error::context_struct_compute_av still static"; fail=1; }
           [ "$fail" = 0 ]
