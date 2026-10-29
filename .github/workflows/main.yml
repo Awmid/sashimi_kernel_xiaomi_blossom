@@ -12,6 +12,14 @@ on:
         description: "Branch, tag or FULL commit SHA to build (blank = the branch you ran this on)"
         required: false
         default: ""
+      bakasu_commit:
+        description: "BakaSU branch/tag/SHA (blank = value in env below)"
+        required: false
+        default: ""
+      susfs_patch_ref:
+        description: "JackA1ltman NonGKI_Kernel_Build_2nd branch/SHA for the SUSFS patch (blank = value in env below)"
+        required: false
+        default: ""
 
 concurrency:
   group: ksu-${{ github.ref }}
@@ -26,10 +34,9 @@ env:
   # Set to "true" only if the build dies on -Werror in vendor drivers.
   STRIP_WERROR: "false"
 
-  # ---- Pins ------------------------------------------------------------
-  # Everything below is floating on purpose until the first green build.
   # The "Record integration versions" step prints the exact SHAs and
   # hashes. Once green, paste them here and the build becomes reproducible.
+  # bakasu default "main" , susfs default "mainline"
   BAKASU_COMMIT: "main"
   SUSFS_PATCH_REF: "mainline"
 
@@ -124,7 +131,7 @@ jobs:
       # ------------------------------------------------------------------
       - name: Download SUSFS patch + hook script
         run: |
-          BASE="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/${SUSFS_PATCH_REF}/Patches"
+          BASE="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/${SUSFS_PATCH_REF}/Patches"
           curl -fLSs --retry 3 "$BASE/Patch/susfs_patch_to_4.19.patch" -o /tmp/susfs_patch_to_4.19.patch
           curl -fLSs --retry 3 "$BASE/susfs_inline_hook_patches.sh"    -o /tmp/susfs_inline_hook_patches.sh
           test -s /tmp/susfs_patch_to_4.19.patch
@@ -136,6 +143,7 @@ jobs:
             echo "BakaSU ref requested : ${BAKASU_COMMIT}"
             echo "BakaSU resolved SHA  : $(git -C KernelSU rev-parse HEAD)"
             echo "SUSFS patch ref      : ${SUSFS_PATCH_REF}"
+            echo "SUSFS patch SHA      : $(curl -fsSL -H 'Accept: application/vnd.github.sha' https://api.github.com/repos/JackA1ltman/NonGKI_Kernel_Build_2nd/commits/${SUSFS_PATCH_REF} || echo unknown)"
             sha256sum /tmp/susfs_patch_to_4.19.patch /tmp/susfs_inline_hook_patches.sh
           } | tee integration-versions.txt
 
